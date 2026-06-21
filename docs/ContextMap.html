@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="ja">
+    <head>
+        <meta charset="UTF-8" />
+        <title>ContextMap: DrawLab</title>
+
+        <!-- ============================================================
+         STACK
+         runtime:  Tauri 2.0
+         frontend: React 18 + TypeScript
+         router:   React Router v6
+         state:    Zustand
+         db:       SQLite (tauri-plugin-sql + sqlx) + FTS5
+         llm:      Anthropic API (claude-sonnet-4-20250514)
+         testing:  Vitest + RTL + Storybook + Playwright
+         package:  pnpm
+    ============================================================ -->
+
+        <!-- ============================================================
+         GLOBAL STORE
+         複数のコンテキストをまたいで共有すべき状態のみを定義する。
+    ============================================================ -->
+        <script id="global-store" type="application/json">
+      {
+        "currentRoute": "parts-zukan",
+        "dbReady": false
+      }
+    </script>
+
+        <!-- sidebar のローカル状態 -->
+        <script data-context="sidebar" class="local-state" type="application/json">
+      { "activeNav": "parts-zukan" }
+    </script>
+
+        <!-- parts-zukan のローカル状態 -->
+        <script data-context="parts-zukan" class="local-state" type="application/json">
+      {
+        "searchQuery": "",
+        "searchResults": null,
+        "selectedPartId": null,
+        "activeCategory": "すべて",
+        "screen": "catalog"
+      }
+    </script>
+
+        <!-- shape-editor のローカル状態 -->
+        <script data-context="shape-editor" class="local-state" type="application/json">
+      {
+        "activePartType": "eye",
+        "points": {},
+        "params": {
+          "irisRadius": 22,
+          "pupilRadius": 14,
+          "eyeGap": 80,
+          "eyeRotation": 0,
+          "eyeOpenness": 0.5,
+          "upperThickness": 2.8,
+          "lowerThickness": 1.6,
+          "irisColor": "#2C3E7A"
+        },
+        "selectedKey": null,
+        "showControls": true,
+        "historyIndex": 0
+      }
+    </script>
+
+        <!-- chara-creator のローカル状態 -->
+        <script data-context="chara-creator" class="local-state" type="application/json">
+      {
+        "selections": [],
+        "activeView": "front",
+        "savedCharaId": null
+      }
+    </script>
+
+        <!-- part-upload-dialog のローカル状態 -->
+        <script data-context="part-upload-dialog" class="local-state" type="application/json">
+      {
+        "open": false,
+        "form": {
+          "label": "",
+          "category": "",
+          "difficulty": 1,
+          "desc": "",
+          "impressions": [],
+          "tags": []
+        },
+        "imagePath": null,
+        "errors": {}
+      }
+    </script>
+
+        <style>
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            body {
+                display: flex;
+                height: 100vh;
+                font-family: 'Hiragino Kaku Gothic ProN', sans-serif;
+                background: #0F0E14;
+                color: #E8DCC8;
+                overflow: hidden;
+            }
+
+            /* ── Sidebar ── */
+            #sidebar {
+                width: 56px;
+                background: #1A1A2E;
+                border-right: 1px solid rgba(255, 255, 255, 0.06);
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                padding: 16px 0;
+                gap: 8px;
+                flex-shrink: 0;
+            }
+
+            .nav-icon {
+                width: 40px;
+                height: 40px;
+                border-radius: 10px;
+                background: rgba(255, 255, 255, 0.04);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 18px;
+                cursor: pointer;
+            }
+
+            .nav-icon.active {
+                background: rgba(201, 169, 110, 0.15);
+                border-color: rgba(201, 169, 110, 0.4);
+            }
+
+            /* ── Main layout ── */
+            #main {
+                flex: 1;
+                display: flex;
+                overflow: hidden;
+            }
+
+            /* ── Parts Zukan ── */
+            #parts-zukan {
+                display: flex;
+                flex: 1;
+                overflow: hidden;
+            }
+
+            #parts-list {
+                width: 320px;
+                border-right: 1px solid rgba(255, 255, 255, 0.06);
+                display: flex;
+                flex-direction: column;
+                flex-shrink: 0;
+            }
+
+            #parts-search {
+                padding: 12px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            }
+
+            #parts-search input {
+                width: 100%;
+                background: rgba(255, 255, 255, 0.04);
+                border: 1px solid rgba(201, 169, 110, 0.25);
+                border-radius: 10px;
+                padding: 8px 12px;
+                color: #E8DCC8;
+                font-size: 13px;
+            }
+
+            #category-tabs {
+                display: flex;
+                gap: 6px;
+                padding: 8px 12px;
+                flex-wrap: wrap;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            }
+
+            .category-tab {
+                padding: 4px 10px;
+                border-radius: 14px;
+                font-size: 11px;
+                background: rgba(255, 255, 255, 0.04);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                color: rgba(255, 255, 255, 0.5);
+                cursor: pointer;
+            }
+
+            .category-tab.active {
+                background: rgba(201, 169, 110, 0.15);
+                border-color: rgba(201, 169, 110, 0.4);
+                color: #C9A96E;
+            }
+
+            #parts-grid {
+                flex: 1;
+                overflow-y: auto;
+                padding: 10px;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+                align-content: start;
+            }
+
+            .part-card {
+                background: rgba(255, 255, 255, 0.03);
+                border: 1px solid rgba(255, 255, 255, 0.07);
+                border-radius: 10px;
+                overflow: hidden;
+                cursor: pointer;
+            }
+
+            .part-card-thumb {
+                background: #FAFAF8;
+                height: 80px;
+            }
+
+            .part-card-info {
+                padding: 6px 8px;
+                font-size: 11px;
+            }
+
+            #parts-detail {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                padding: 24px;
+                gap: 16px;
+            }
+
+            .part-preview {
+                width: 240px;
+                height: 240px;
+                background: #FAFAF8;
+                border-radius: 12px;
+            }
+
+            .tag-list {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+            }
+
+            .tag {
+                font-size: 10px;
+                padding: 2px 8px;
+                border-radius: 10px;
+                background: rgba(201, 169, 110, 0.1);
+                border: 1px solid rgba(201, 169, 110, 0.2);
+                color: #C9A96E;
+            }
+
+            /* ── Shape Editor ── */
+            #shape-editor {
+                display: flex;
+                flex: 1;
+                overflow: hidden;
+            }
+
+            #shape-controls {
+                width: 220px;
+                background: rgba(255, 255, 255, 0.02);
+                border-right: 1px solid rgba(255, 255, 255, 0.06);
+                padding: 16px;
+                overflow-y: auto;
+                flex-shrink: 0;
+            }
+
+            #shape-canvas-area {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                padding: 24px;
+                gap: 12px;
+            }
+
+            #shape-canvas {
+                width: 400px;
+                height: 300px;
+                background: #FAFAF8;
+                border-radius: 14px;
+            }
+
+            #shape-llm {
+                width: 260px;
+                background: rgba(255, 255, 255, 0.02);
+                border-left: 1px solid rgba(255, 255, 255, 0.06);
+                padding: 16px;
+                flex-shrink: 0;
+            }
+
+            .slider-row {
+                margin-bottom: 12px;
+            }
+
+            .slider-label {
+                display: flex;
+                justify-content: space-between;
+                font-size: 10px;
+                color: rgba(255, 255, 255, 0.5);
+                margin-bottom: 4px;
+            }
+
+            /* ── Chara Creator ── */
+            #chara-creator {
+                display: flex;
+                flex: 1;
+                overflow: hidden;
+            }
+
+            #chara-parts-panel {
+                width: 260px;
+                background: #1A1A2E;
+                border-right: 1px solid rgba(255, 255, 255, 0.06);
+                display: flex;
+                flex-direction: column;
+                flex-shrink: 0;
+            }
+
+            #chara-preview-area {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 16px;
+            }
+
+            #chara-canvas {
+                width: 320px;
+                height: 380px;
+                background: #FAFAF8;
+                border-radius: 16px;
+            }
+
+            #chara-info {
+                width: 180px;
+                background: rgba(255, 255, 255, 0.02);
+                border-left: 1px solid rgba(255, 255, 255, 0.06);
+                padding: 16px;
+                flex-shrink: 0;
+            }
+
+            /* ── Common ── */
+            .section-label {
+                font-size: 9px;
+                letter-spacing: 0.3em;
+                color: #C9A96E;
+                margin-bottom: 10px;
+                text-transform: uppercase;
+            }
+
+            .btn {
+                padding: 7px 16px;
+                border-radius: 20px;
+                font-size: 12px;
+                border: 1px solid rgba(201, 169, 110, 0.3);
+                background: rgba(201, 169, 110, 0.1);
+                color: #C9A96E;
+                cursor: pointer;
+            }
+        </style>
+    </head>
+    <body>
+
+        <!-- ============================================================
+         src/components/Sidebar.tsx
+         describe: ナビゲーションを切り替える
+           [ ] 図鑑アイコンをクリックすると parts-zukan に遷移する
+           [ ] エディターアイコンをクリックすると shape-editor に遷移する
+           [ ] キャラクリアイコンをクリックすると chara-creator に遷移する
+           [ ] アクティブなルートのアイコンがハイライトされる
+    ============================================================ -->
+        <nav id="sidebar">
+            <div class="nav-icon active" title="パーツ図鑑">📖</div>
+            <div class="nav-icon" title="シェイプエディター">✏️</div>
+            <div class="nav-icon" title="キャラクリエイター">🎨</div>
+        </nav>
+
+        <div id="main">
+
+            <!-- ══════════════════════════════════════════════════════════
+           ROUTE: /parts-zukan
+           パーツ図鑑
+      ══════════════════════════════════════════════════════════ -->
+            <div id="parts-zukan">
+
+                <div id="parts-list">
+
+                    <!-- ============================================================
+               src/components/PartsSearch.tsx
+               describe: パーツを自然言語で検索する
+                 [ ] テキストを入力してEnterを押すとLLMが検索クエリを解釈する
+                 [ ] 検索中はローディングインジケーターが表示される
+                 [ ] 検索結果件数とAIコメントが表示される
+                 [ ] ✕ボタンで検索をクリアして全件表示に戻る
+                 [ ] サジェストチップをクリックするとクエリがセットされ検索が実行される
+          ============================================================ -->
+                    <div id="parts-search">
+                        <input type="text" placeholder='例: "クールな目" "初心者向け"' />
+                    </div>
+
+                    <!-- ============================================================
+               src/components/CategoryTabs.tsx
+               describe: カテゴリでパーツを絞り込む
+                 [ ] カテゴリタブをクリックするとそのカテゴリのみ表示される
+                 [ ] 「すべて」タブで全件表示に戻る
+                 [ ] アクティブなタブがハイライトされる
+          ============================================================ -->
+                    <div id="category-tabs">
+                        <div class="category-tab active">すべて</div>
+                        <div class="category-tab">目</div>
+                        <div class="category-tab">眉</div>
+                        <div class="category-tab">鼻</div>
+                        <div class="category-tab">口</div>
+                        <div class="category-tab">髪</div>
+                    </div>
+
+                    <!-- ============================================================
+               src/components/PartsList.tsx
+               describe: パーツ一覧を閲覧する
+                 [ ] パーツカードが2カラムグリッドで表示される
+                 [ ] カードにサムネイル・ラベル・カテゴリ・難易度が表示される
+                 [ ] カードをクリックすると詳細パネルに選択パーツが表示される
+                 [ ] 検索結果が0件のとき「見つかりませんでした」が表示される
+          ============================================================ -->
+                    <div id="parts-grid">
+                        <div class="part-card">
+                            <div class="part-card-thumb"></div>
+                            <div class="part-card-info">たれ目 · 目</div>
+                        </div>
+                        <div class="part-card">
+                            <div class="part-card-thumb"></div>
+                            <div class="part-card-info">つり目 · 目</div>
+                        </div>
+                        <div class="part-card">
+                            <div class="part-card-thumb"></div>
+                            <div class="part-card-info">スマイル · 口</div>
+                        </div>
+                        <div class="part-card">
+                            <div class="part-card-thumb"></div>
+                            <div class="part-card-info">アーチ眉 · 眉</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============================================================
+             src/components/PartDetail.tsx
+             describe: パーツの詳細を確認・操作する
+               [ ] 選択中パーツのプレビューが表示される
+               [ ] 「▶ 描き順を見る」でストロークアニメーションが再生される
+               [ ] 印象タグ・ハッシュタグをクリックすると関連検索が実行される
+               [ ] 「練習する」ボタンでガイド線トレース練習モードに入る
+               [ ] 「シェイプエディターで編集」ボタンで shape-editor に遷移する
+               [ ] 「削除」ボタンでパーツを削除する（確認ダイアログあり）
+               [ ] パーツ未選択時はプレースホルダーが表示される
+        ============================================================ -->
+                <div id="parts-detail">
+                    <div class="part-preview"></div>
+                    <div class="tag-list">
+                        <span class="tag">やさしい</span>
+                        <span class="tag">かわいい</span>
+                        <span class="tag">#たれ目</span>
+                        <span class="tag">#初心者向け</span>
+                    </div>
+                    <div style="display:flex;gap:8px">
+                        <button class="btn">▶ 描き順を見る</button>
+                        <button class="btn">✏️ 練習する</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ══════════════════════════════════════════════════════════
+           ROUTE: /shape-editor
+           シェイプエディター（非表示 - ルーティングで切り替え）
+      ══════════════════════════════════════════════════════════ -->
+            <div id="shape-editor" style="display:none">
+
+                <!-- ============================================================
+             src/components/ShapeControls.tsx
+             describe: シェイプのパラメーターを調整する
+               [ ] プリセットボタンをクリックするとアニメーションで形状が変わる
+               [ ] 選択中ポイントのXY座標が数値入力で表示・編集できる
+               [ ] Y±ボタンで選択ポイントのY座標を微調整できる
+               [ ] 各スライダーを動かすとリアルタイムでプレビューが更新される
+               [ ] 眉間の幅スライダーが目幅と連動する
+               [ ] ポイント一覧から任意のポイントを選択できる
+        ============================================================ -->
+                <div id="shape-controls">
+                    <div class="section-label">プリセット</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">
+                        <button class="btn">基本</button>
+                        <button class="btn">たれ目</button>
+                        <button class="btn">つり目</button>
+                        <button class="btn">大きい目</button>
+                        <button class="btn">ジト目</button>
+                    </div>
+                    <div class="section-label">パラメータ</div>
+                    <div class="slider-row">
+                        <div class="slider-label"><span>眉間の幅</span><span>80</span></div>
+                        <input type="range" style="width:100%" />
+                    </div>
+                    <div class="slider-row">
+                        <div class="slider-label"><span>目の角度</span><span>0°</span></div>
+                        <input type="range" style="width:100%" />
+                    </div>
+                    <div class="slider-row">
+                        <div class="slider-label"><span>目の開閉</span><span>0.50</span></div>
+                        <input type="range" style="width:100%" />
+                    </div>
+                    <div class="slider-row">
+                        <div class="slider-label"><span>虹彩サイズ</span><span>22</span></div>
+                        <input type="range" style="width:100%" />
+                    </div>
+                </div>
+
+                <!-- ============================================================
+             src/components/ShapeCanvas.tsx
+             describe: コントロールポイントをドラッグして形状を編集する
+               [ ] 左目のコントロールポイントをドラッグして位置を変えられる
+               [ ] 右目はリアルタイムでミラーリングされる
+               [ ] 目頭・目尻・上ライン頂点・下ライン底点・瞳孔中心が独立して動く
+               [ ] コントロールポイントにマウスを乗せるとラベルが表示される
+               [ ] ポイントをクリックすると選択状態になり座標パネルが更新される
+               [ ] コントロールポイント表示ON/OFFを切り替えられる
+        ============================================================ -->
+                <div id="shape-canvas-area">
+                    <div id="shape-canvas"></div>
+                    <div style="display:flex;gap:8px">
+                        <button class="btn">↩ Undo</button>
+                        <button class="btn">↪ Redo</button>
+                        <button class="btn">図鑑に登録</button>
+                    </div>
+                </div>
+
+                <!-- ============================================================
+             src/components/ShapeLLMPanel.tsx
+             describe: AIに自然言語でシェイプを指示する
+               [ ] テキストを入力してEnterを押すとLLMがポイント座標を調整する
+               [ ] サジェストチップをクリックするとテキストエリアにセットされる
+               [ ] 調整中はローディングが表示される
+               [ ] 履歴に過去の指示と説明が表示される
+               [ ] つり目指示では目尻のYのみ変更され目頭は動かない
+        ============================================================ -->
+                <div id="shape-llm">
+                    <div class="section-label">AIに指示する</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">
+                        <button class="btn" style="font-size:10px;padding:3px 8px">つり目にして</button>
+                        <button class="btn" style="font-size:10px;padding:3px 8px">たれ目にして</button>
+                        <button class="btn" style="font-size:10px;padding:3px 8px">もっと大きく</button>
+                    </div>
+                    <textarea
+                        style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(201,169,110,0.2);border-radius:8px;padding:8px;color:#E8DCC8;font-size:12px;resize:none"
+                        rows="3" placeholder="例: つり目にして、目尻を上げて..."></textarea>
+                    <button class="btn" style="width:100%;margin-top:8px;text-align:center">↵ 送信</button>
+                </div>
+            </div>
+
+            <!-- ══════════════════════════════════════════════════════════
+           ROUTE: /chara-creator
+           キャラクリエイター（非表示 - ルーティングで切り替え）
+      ══════════════════════════════════════════════════════════ -->
+            <div id="chara-creator" style="display:none">
+
+                <!-- ============================================================
+             src/components/CharaPartsPanel.tsx
+             describe: パーツを選択してキャラクターをカスタマイズする
+               [ ] カテゴリタブで編集対象パーツを切り替えられる
+               [ ] 各カテゴリのパーツサムネイルが表示される
+               [ ] サムネイルをクリックするとそのパーツが選択されプレビューに反映される
+               [ ] 選択中パーツはハイライトされる
+               [ ] 髪色スウォッチで髪色を変更できる
+               [ ] 肌色を4種類から選択できる
+        ============================================================ -->
+                <div id="chara-parts-panel">
+                    <div style="padding:12px;border-bottom:1px solid rgba(255,255,255,0.06)">
+                        <div style="display:flex;gap:6px;flex-wrap:wrap">
+                            <button class="btn" style="font-size:10px">輪郭</button>
+                            <button class="btn" style="font-size:10px">目</button>
+                            <button class="btn" style="font-size:10px">眉</button>
+                            <button class="btn" style="font-size:10px">鼻</button>
+                            <button class="btn" style="font-size:10px">口</button>
+                            <button class="btn" style="font-size:10px">髪</button>
+                            <button class="btn" style="font-size:10px">肌</button>
+                        </div>
+                    </div>
+                    <div style="flex:1;overflow-y:auto;padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                        <div class="part-card">
+                            <div class="part-card-thumb"></div>
+                            <div class="part-card-info">たれ目</div>
+                        </div>
+                        <div class="part-card">
+                            <div class="part-card-thumb"></div>
+                            <div class="part-card-info">つり目</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============================================================
+             src/components/CharaPreview.tsx
+             describe: キャラクターのプレビューを確認する
+               [ ] 選択済みパーツがSVGレイヤーで重なって表示される
+               [ ] 正面・横・後ろの三面図を切り替えられる
+               [ ] パーツを変更するとリアルタイムでプレビューが更新される
+        ============================================================ -->
+                <div id="chara-preview-area">
+                    <div style="display:flex;gap:8px">
+                        <button class="btn">正面</button>
+                        <button class="btn">横</button>
+                        <button class="btn">後ろ</button>
+                    </div>
+                    <div id="chara-canvas"></div>
+                    <div style="display:flex;gap:8px">
+                        <button class="btn">💾 保存</button>
+                        <button class="btn">⬇ エクスポート</button>
+                    </div>
+                </div>
+
+                <!-- ============================================================
+             src/components/CharaInfo.tsx
+             describe: キャラクターの選択状態を確認する
+               [ ] 各カテゴリの選択中パーツ名が一覧表示される
+               [ ] 未選択のカテゴリは「未設定」と表示される
+        ============================================================ -->
+                <div id="chara-info">
+                    <div class="section-label">選択中</div>
+                    <div style="font-size:11px;display:flex;flex-direction:column;gap:6px">
+                        <div style="display:flex;justify-content:space-between"><span
+                                style="color:rgba(255,255,255,0.4)">輪郭</span><span>丸顔</span></div>
+                        <div style="display:flex;justify-content:space-between"><span
+                                style="color:rgba(255,255,255,0.4)">目</span><span>たれ目</span></div>
+                        <div style="display:flex;justify-content:space-between"><span
+                                style="color:rgba(255,255,255,0.4)">眉</span><span>アーチ眉</span></div>
+                        <div style="display:flex;justify-content:space-between"><span
+                                style="color:rgba(255,255,255,0.4)">鼻</span><span>シンプル</span></div>
+                        <div style="display:flex;justify-content:space-between"><span
+                                style="color:rgba(255,255,255,0.4)">口</span><span>スマイル</span></div>
+                        <div style="display:flex;justify-content:space-between"><span
+                                style="color:rgba(255,255,255,0.4)">髪</span><span>ショート</span></div>
+                    </div>
+                </div>
+            </div>
+
+        </div><!-- /#main -->
+
+        <!-- ============================================================
+         src/components/PartUploadDialog.tsx
+         describe: パーツを新規登録する
+           [ ] open=true のとき登録フォームが表示される
+           [ ] 画像ファイルを選択するとサムネイルプレビューが表示される
+           [ ] ラベル・カテゴリ・難易度・説明・印象・タグを入力できる
+           [ ] 必須項目が未入力のとき送信ボタンが無効化される
+           [ ] 送信するとDBにパーツが登録され図鑑に反映される
+           [ ] キャンセルまたはESCキーでダイアログが閉じる
+    ============================================================ -->
+        <div
+            style="position:fixed;inset:0;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center">
+            <dialog
+                style="all:unset;display:flex;flex-direction:column;background:#1A1A2E;border:1px solid rgba(201,169,110,0.2);border-radius:16px;padding:24px;width:480px;gap:14px">
+                <div style="font-size:16px;font-weight:300;letter-spacing:0.1em">パーツを登録</div>
+                <div style="background:#FAFAF8;height:120px;border-radius:8px"></div>
+                <input type="text" placeholder="ラベル"
+                    style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:8px 12px;color:#E8DCC8;font-size:13px" />
+                <div style="display:flex;gap:8px">
+                    <button class="btn" style="flex:1">キャンセル</button>
+                    <button class="btn" style="flex:1;background:rgba(201,169,110,0.25)">登録する</button>
+                </div>
+            </dialog>
+        </div>
+
+    </body>
+</html>
